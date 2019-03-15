@@ -79,7 +79,7 @@ setMethod("dbReadTable", c("MariaDBConnection", "character"),
 setMethod("dbWriteTable", c("MariaDBConnection", "character", "data.frame"),
   function(conn, name, value, field.types = NULL, row.names = FALSE,
            overwrite = FALSE, append = FALSE, ...,
-           temporary = FALSE) {
+           temporary = FALSE, columnstore = FALSE) {
 
     row.names <- compatRowNames(row.names)
 
@@ -95,6 +95,9 @@ setMethod("dbWriteTable", c("MariaDBConnection", "character", "data.frame"),
     if (!is.logical(temporary) || length(temporary) != 1L)  {
       stopc("`temporary` must be a logical scalar")
     }
+    if (!is.logical(columnstore) || length(columnstore) != 1L)  {
+      stopc("`columnnstore` must be a logical scalar")
+    }
     if (overwrite && append) {
       stopc("overwrite and append cannot both be TRUE")
     }
@@ -103,6 +106,9 @@ setMethod("dbWriteTable", c("MariaDBConnection", "character", "data.frame"),
     }
     if (append && !is.null(field.types)) {
       stopc("Cannot specify `field.types` with `append = TRUE`")
+    }
+    if (columnstore == TRUE && temporary == TRUE){
+      stopc("Cannot create temporary columnstore tables")
     }
 
     need_transaction <- !connection_is_transacting(conn@ptr)
@@ -144,7 +150,8 @@ setMethod("dbWriteTable", c("MariaDBConnection", "character", "data.frame"),
         conn = conn,
         name = name,
         fields = combined_field_types,
-        temporary = temporary
+        temporary = temporary,
+        columnstore = columnstore
       )
     }
 
@@ -380,3 +387,66 @@ setMethod("dbDataType", "MariaDBDriver", function(dbObj, obj, ...) {
     stop("Unsupported type", call. = FALSE)
   )
 })
+
+#' Compose query to create a Columnstore table
+#'
+#' Exposes an interface to Columnstore `CREATE TABLE` commands. The default
+#' method is ANSI SQL 99 compliant.
+#' This method is mostly useful for backend implementers.
+#'
+#' The `row.names` argument must be passed explicitly in order to avoid
+#' a compatibility warning.  The default will be changed in a later release.
+#'
+#' @param con A database connection.
+#' @param table Name of the table. Escaped with
+#'   [dbQuoteIdentifier()].
+#' @param fields Either a character vector or a data frame.
+#'
+#'   A named character vector: Names are column names, values are types.
+#'   Names are escaped with [dbQuoteIdentifier()].
+#'   Field types are unescaped.
+#'
+#'   A data frame: field types are generated using
+#'   [dbDataType()].
+#' @param temporary If `TRUE`, will generate a temporary table statement.
+#' @inheritParams rownames
+#' @param ... Other arguments used by individual methods.
+#' @export
+#' @examples
+#' sqlCreateTable(ANSI(), "my-table", c(a = "integer", b = "text"))
+#' sqlCreateTable(ANSI(), "my-table", iris)
+#'
+#' # By default, character row names are converted to a row_names colum
+#' sqlCreateTable(ANSI(), "mtcars", mtcars[, 1:5])
+#' sqlCreateTable(ANSI(), "mtcars", mtcars[, 1:5], row.names = FALSE)
+setGeneric("sqlCreateTable",
+           def = function(con, table, fields, row.names = NA, temporary = FALSE, columnstore = FALSE, ...) standardGeneric("sqlCreateTableColumnstore")
+)
+
+#' @rdname hidden_aliases
+#' @export
+setMethod("sqlCreateTable", signature("DBIConnection"),
+          function(con, table, fields, row.names = NA, columnstore = FALSE, ...) {
+            if (missing(row.names)) {
+              warning("Do not rely on the default value of the row.names argument for sqlCreateTableColumnstore(), it will change in the future.",
+                      call. = FALSE
+              )
+            }
+            
+            table <- dbQuoteIdentifier(con, table)
+            
+            if (is.data.frame(fields)) {
+              fields <- sqlRownamesToColumn(fields, row.names)
+              fields <- vapply(fields, function(x) DBI::dbDataType(con, x), character(1))
+            }
+            
+            field_names <- dbQuoteIdentifier(con, names(fields))
+            field_types <- unname(fields)
+            fields <- paste0(field_names, " ", field_types)
+            
+            SQL(paste0(
+              "CREATE ", if (temporary) "TEMPORARY ", "TABLE ", table, " (\n",
+              "  ", paste(fields, collapse = ",\n  "), "\n)\n ", if (columnstore) "engine=columnstore"
+            ))
+          }
+)
